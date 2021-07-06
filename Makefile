@@ -5,7 +5,7 @@ ifeq (,$(findstring deb-,$(MAKECMDGOALS)))
 ZLIB_INC = /usr/local/Cellar/libdeflate/1.7/include
 ZLIB_LIB = -ldeflate
 ZLIB_LIBDIR = -L/usr/local/Cellar/libdeflate/1.7/lib
-DEBUG = 1
+DEBUG = 0
 
 # These should not require modification
 MODULE_big = gzip

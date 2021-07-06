@@ -71,7 +71,6 @@ Datum pg_gzip(PG_FUNCTION_ARGS)
 
   uint8* out = (uint8*)palloc(bound);
   size_t bound_real = libdeflate_gzip_compress(enc, in, in_size, out, bound);
-  elog(LOG, "Estimated: %ld, Real: %ld.", bound, bound_real);
 
   bytea *compressed = palloc(bound_real + VARHDRSZ);
   SET_VARSIZE(compressed, bound_real + VARHDRSZ);
@@ -106,7 +105,6 @@ Datum pg_gunzip(PG_FUNCTION_ARGS)
     uint8* out = palloc(bound);
 
     enum libdeflate_result result = libdeflate_gzip_decompress(dec, in, in_size, out, bound, &actual_size);
-    elog(LOG, "Deflate result %d, actual size %ld", result, actual_size);
 
     if (result == LIBDEFLATE_INSUFFICIENT_SPACE) {
       if (bound * 2 <= bound) {

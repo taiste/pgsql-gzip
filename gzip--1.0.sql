@@ -1,12 +1,12 @@
 
-CREATE OR REPLACE FUNCTION gzip(uncompressed bytea, compression_level integer default -1)
+CREATE OR REPLACE FUNCTION gzip(uncompressed bytea, compression_level integer default 6)
     RETURNS bytea
     AS 'MODULE_PATHNAME', 'pg_gzip'
     LANGUAGE 'c'
     IMMUTABLE STRICT
     PARALLEL SAFE;
 
-CREATE OR REPLACE FUNCTION gzip(uncompressed text, compression_level integer default -1)
+CREATE OR REPLACE FUNCTION gzip(uncompressed text, compression_level integer default 6)
     RETURNS bytea
     AS 'MODULE_PATHNAME', 'pg_gzip'
     LANGUAGE 'c'

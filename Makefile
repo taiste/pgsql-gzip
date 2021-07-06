@@ -1,21 +1,11 @@
 # Make sure we do not run any code when using deb-* target
 ifeq (,$(findstring deb-,$(MAKECMDGOALS)))
 
-# Detect pkg-config on the path
-PKGCONFIG := $(shell type -p pkg-config || echo NONE)
 
-ifeq ($(PKGCONFIG), NONE)
-# Hard code paths if necessary
-ZLIB_PATH = /usr
-ZLIB_INC = -I$(ZLIB_PATH)/include
-ZLIB_LIB = -L$(ZLIB_PATH)/lib -lz
-else
-# Use pkg-config to detect zlib if possible
-ZLIB_INC = $(shell pkg-config zlib --cflags)
-ZLIB_LIB = $(shell pkg-config zlib --libs)
-endif
-
-#DEBUG = 1
+ZLIB_INC = /usr/local/Cellar/libdeflate/1.7/include
+ZLIB_LIB = -ldeflate
+ZLIB_LIBDIR = -L/usr/local/Cellar/libdeflate/1.7/lib
+DEBUG = 1
 
 # These should not require modification
 MODULE_big = gzip
@@ -28,6 +18,7 @@ EXTRA_CLEAN =
 PG_CONFIG = pg_config
 
 CFLAGS += $(ZLIB_INC)
+LDFLAGS += $(ZLIB_LIBDIR)
 LIBS += $(ZLIB_LIB)
 SHLIB_LINK := $(LIBS)
 

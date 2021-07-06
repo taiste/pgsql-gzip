@@ -27,9 +27,6 @@
  *
  ***********************************************************************/
 
-/* Constants */
-#define ZCHUNK 262144 /* 256K */
-
 /* System */
 #include <assert.h>
 #include <stdio.h>
@@ -41,35 +38,18 @@
 #include <fmgr.h>
 #include <funcapi.h>
 
-/* LibZ */
-#include <zlib.h>
+/* Libdeflate */
+#include <libdeflate.h>
+
+extern void _PG_init(void);
 
 /* Set up PgSQL */
 PG_MODULE_MAGIC;
 
-/**
-* Wrap palloc in a signature that matches what zalloc expects
-*/
-static void*
-pg_gzip_alloc(void* opaque, unsigned int items, unsigned int itemsize)
-{
-	return palloc(items * itemsize);
+void _PG_init(void) {
+  libdeflate_set_memory_allocator(palloc, pfree);
 }
 
-/**
-* Wrap pfree in a signature that matches what zfree expects
-*/
-static void
-pg_gzip_free(void* opaque, void* ptr)
-{
-	pfree(ptr);
-	return;
-}
-
-/* Zlib defines */
-#define WINDOW_BITS 15
-#define ENABLE_ZLIB_GZIP 32
-#define GZIP_ENCODING 16
 
 /**
 * gzip an uncompressed bytea
@@ -78,63 +58,28 @@ Datum pg_gzip(PG_FUNCTION_ARGS);
 PG_FUNCTION_INFO_V1(pg_gzip);
 Datum pg_gzip(PG_FUNCTION_ARGS)
 {
-	StringInfoData si;
-	int zs_rv;
-	z_stream zs;
-	uint8 out[ZCHUNK];
-	bytea* compressed;
+  bytea* uncompressed = PG_GETARG_BYTEA_P(0);
+  int32 compression_level = PG_GETARG_INT32(1);
+  uint8* in = (uint8*)(VARDATA(uncompressed));
+  size_t in_size = VARSIZE_ANY_EXHDR(uncompressed);
 
-	bytea* uncompressed = PG_GETARG_BYTEA_P(0);
-	int32 compression_level = PG_GETARG_INT32(1);
-	uint8* in = (uint8*)(VARDATA(uncompressed));
-	size_t in_size = VARSIZE_ANY_EXHDR(uncompressed);
+  struct libdeflate_compressor *enc = libdeflate_alloc_compressor(compression_level);
+  if (enc == NULL)
+    elog(ERROR, "could not initialize libdeflate");
 
-	/* compression level -1 is default best effort (approx 6) */
-	/* level 0 is no compression, 1-9 are lowest to highest */
-	if (compression_level < -1 || compression_level > 9)
-		elog(ERROR, "invalid compression level: %d", compression_level);
+  size_t bound = libdeflate_gzip_compress_bound(enc, in_size);
 
-	/* Prepare the z_stream state */
-	zs.zalloc = pg_gzip_alloc;
-	zs.zfree = pg_gzip_free;
-	zs.opaque = Z_NULL;
-	zs.next_in = in;
-	zs.avail_in = in_size;
+  uint8* out = (uint8*)palloc(bound);
+  size_t bound_real = libdeflate_gzip_compress(enc, in, in_size, out, bound);
+  elog(LOG, "Estimated: %ld, Real: %ld.", bound, bound_real);
 
-	if (deflateInit2(&zs,
-	                 compression_level, Z_DEFLATED,
-	                 WINDOW_BITS|GZIP_ENCODING, /* Magic to initialize in gzip mode */
-	                 8, Z_DEFAULT_STRATEGY) != Z_OK)
-		elog(ERROR, "failed to deflateInit2");
-
-	zs.next_out = out;
-	zs.avail_out = ZCHUNK;
-
-	/* Compress until deflate stops returning output */
-	initStringInfo(&si);
-	zs_rv = Z_OK;
-	while (zs_rv == Z_OK)
-	{
-		if (zs.avail_out == 0)
-		{
-			/* build up output in stringinfo */
-			appendBinaryStringInfo(&si, (char*)out, ZCHUNK);
-			zs.avail_out = ZCHUNK;
-			zs.next_out = out;
-		}
-		zs_rv = deflate(&zs, Z_FINISH);
-	}
-	if (zs_rv != Z_STREAM_END)
-		elog(ERROR, "compression error: %s", zs.msg ? zs.msg : "");
-
-	appendBinaryStringInfo(&si, (char*)out, ZCHUNK - zs.avail_out);
-
-	/* Construct output bytea */
-	compressed = palloc(si.len + VARHDRSZ);
-	memcpy(VARDATA(compressed), si.data, si.len);
-	SET_VARSIZE(compressed, si.len + VARHDRSZ);
-	PG_FREE_IF_COPY(uncompressed, 0);
-	PG_RETURN_POINTER(compressed);
+  bytea *compressed = palloc(bound_real + VARHDRSZ);
+  SET_VARSIZE(compressed, bound_real + VARHDRSZ);
+  memcpy(VARDATA(compressed), out, bound_real);
+  pfree(out);
+  libdeflate_free_compressor(enc);
+  PG_FREE_IF_COPY(uncompressed, 0);
+  PG_RETURN_POINTER(compressed);
 }
 
 
@@ -142,54 +87,53 @@ Datum pg_gunzip(PG_FUNCTION_ARGS);
 PG_FUNCTION_INFO_V1(pg_gunzip);
 Datum pg_gunzip(PG_FUNCTION_ARGS)
 {
-	StringInfoData si;
-	int zs_rv;
-	z_stream zs;
-	uint8 out[ZCHUNK];
-	bytea* uncompressed;
+  struct libdeflate_decompressor *dec = libdeflate_alloc_decompressor();
+  if (dec == NULL)
+    elog(ERROR, "could not initialize libdeflate");
 
-	bytea* compressed = PG_GETARG_BYTEA_P(0);
-	uint8* in = (uint8*)(VARDATA(compressed));
-	size_t in_size = VARSIZE_ANY_EXHDR(compressed);
+  bytea* compressed = PG_GETARG_BYTEA_P(0);
+  uint8* in = (uint8*)(VARDATA(compressed));
+  size_t in_size = VARSIZE_ANY_EXHDR(compressed);
 
-	/* Prepare the z_stream state */
-	zs.zalloc = pg_gzip_alloc;
-	zs.zfree = pg_gzip_free;
-	zs.opaque = Z_NULL;
-	/* Magic to initialize in gzip mode */
-	if (inflateInit2(&zs, WINDOW_BITS|ENABLE_ZLIB_GZIP) != Z_OK)
-		elog(ERROR, "failed to inflateInit");
+  // Start from something (2:1 compression ratio for basic binary data), and then double the buffer size until we can decompress it properly.
+  size_t bound = (in_size * 2) < 65536 ? in_size : 65536;
 
-	/* Point z_stream to input and output buffers */
-	zs.next_in = in;
-	zs.avail_in = in_size;
-	zs.next_out = out;
-	zs.avail_out = ZCHUNK;
+  elog(LOG, "Computed bound (in: %ld), %ld", in_size, bound);
 
-	/* Decompress until inflate stops returning output */
-	initStringInfo(&si);
-	zs_rv = Z_OK;
-	while (zs_rv == Z_OK)
-	{
-		if (zs.avail_out == 0)
-		{
-			/* build up output in stringinfo */
-			appendBinaryStringInfo(&si, (char*)out, ZCHUNK);
-			zs.avail_out = ZCHUNK;
-			zs.next_out = out;
-		}
-		zs_rv = inflate(&zs, Z_SYNC_FLUSH);
-	}
+  bytea *uncompressed = NULL;
+  do {
+    size_t actual_size = 0;
+    uint8* out = palloc(bound);
 
-	if (zs_rv != Z_STREAM_END)
-		elog(ERROR, "decompression error: %s", zs.msg ? zs.msg : "");
+    enum libdeflate_result result = libdeflate_gzip_decompress(dec, in, in_size, out, bound, &actual_size);
+    elog(LOG, "Deflate result %d, actual size %ld", result, actual_size);
 
-	appendBinaryStringInfo(&si, (char*)out, ZCHUNK - zs.avail_out);
+    if (result == LIBDEFLATE_INSUFFICIENT_SPACE) {
+      if (bound * 2 <= bound) {
+        elog(ERROR, "Could not deflate. Data corrupt or too large to handle.");
+        break;
+      }
+      bound *= 2;
+      pfree(out);
+      out = NULL;
+      continue;
+    }
 
-	/* Construct output bytea */
-	uncompressed = palloc(si.len + VARHDRSZ);
-	memcpy(VARDATA(uncompressed), si.data, si.len);
-	SET_VARSIZE(uncompressed, si.len + VARHDRSZ);
-	PG_FREE_IF_COPY(compressed, 0);
-	PG_RETURN_POINTER(uncompressed);
+    if (result == LIBDEFLATE_SUCCESS) {
+      /* Construct output bytea */
+      uncompressed = palloc(actual_size + VARHDRSZ);
+      SET_VARSIZE(uncompressed, actual_size + VARHDRSZ);
+      memcpy(VARDATA(uncompressed), out, actual_size);
+      pfree(out);
+      libdeflate_free_decompressor(dec);
+      break;
+    } else {
+      elog(ERROR, "Could not deflate, result %d", result);
+      break;
+    }
+  } while (bound != 0);
+
+  elog(LOG, "Done & done.");
+  PG_FREE_IF_COPY(compressed, 0);
+  PG_RETURN_POINTER(uncompressed);
 }
